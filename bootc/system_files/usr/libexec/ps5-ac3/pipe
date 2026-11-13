@@ -1,0 +1,16 @@
+#!/bin/bash
+# Encodes ps5-ac3-sink (5.1) live to AC-3 640k and sends it to ps5-hdmi-bitstream (AES0=0x06 always).
+# prefill.py holds 4 frames (128 ms) before starting: without it pw-play runs dry and crackles.
+pw-record --raw -P "{ stream.capture.sink = true node.group = ps5-ac3 }" --target ps5-ac3-sink --channels 6 --format f32 --rate 48000 --latency 1536 - \
+ | ffmpeg -hide_banner -loglevel warning -probesize 32 -analyzeduration 0 -fflags +nobuffer -flags +low_delay \
+     -f f32le -ar 48000 -ac 6 -i pipe:0 -c:a ac3 -b:a 640k -f spdif -flush_packets 1 -muxdelay 0 -muxpreload 0 -avioflags direct pipe:1 \
+ | /usr/libexec/ps5-ac3/prefill.py 24576 \
+ | pw-play --raw -P "{ node.group = ps5-ac3 node.name = ps5-ac3-out node.dont-move = true node.dont-reconnect = true node.dont-fallback = true node.lock-quantum = true }" --format s16 --channels 2 --rate 48000 --latency 1536 --target ps5-hdmi-bitstream - &
+# If one piece dies (ffmpeg, say), the others can wait forever (pw-record writes nothing on silence) and the
+# service looks active without sound. When any piece is gone: stop the rest and exit with an error so systemd
+# restarts it, without switching to stereo (changing the card profile with hdmi:0 busy hung PipeWire).
+while sleep 1; do [ "$(pgrep -P $$ -c)" -lt 4 ] && break; done
+echo "$(date +%T) a piece of the pipe died ($(pgrep -P $$ -l | tr "\n" " ")): restarting"
+touch "$XDG_RUNTIME_DIR/ps5-ac3-no-stereo"
+pkill -P $$; sleep 0.5; pkill -9 -P $$
+exit 1

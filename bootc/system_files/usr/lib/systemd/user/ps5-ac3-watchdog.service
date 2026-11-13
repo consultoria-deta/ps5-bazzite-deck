@@ -1,0 +1,10 @@
+[Unit]
+Description=Live 5.1 watchdog: stops ps5-ac3 if the non-audio bit is lost, re-arms it on a new EDID
+After=ps5-ac3.service
+BindsTo=ps5-ac3.service
+
+[Service]
+ExecStart=/usr/libexec/ps5-ac3/watchdog
+Restart=on-abnormal
+RestartSec=1
+OOMScoreAdjust=-100

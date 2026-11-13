@@ -1,0 +1,20 @@
+#!/bin/bash
+# Stops ps5-ac3 at once if the IEC958 status stops being non-audio (AES0=0x06), and re-arms it on a new EDID.
+# Reads the kernel log as a stream (dmesg -W) instead of polling it.
+sleep 1
+coproc KMSG { exec stdbuf -oL dmesg -W 2>/dev/null | grep --line-buffered "got real edid"; }
+while systemctl --user is-active -q ps5-ac3; do
+  B=$(amixer -c HDMI cget name="IEC958 Playback Default" | grep -o "AES0=0x[0-9a-f]*")
+  # An empty read means the card cannot be read (logind access lost while the session changes), not a bad bit.
+  # Without access the pipe cannot write either, so there is no noise risk: try again.
+  if [ -z "$B" ]; then sleep 1; continue; fi
+  if [ "$B" != "AES0=0x06" ]; then echo "$(date +%T) STOPPED: bit=$B"; touch "$XDG_RUNTIME_DIR/ps5-ac3-bad-bit"; systemctl --user stop ps5-ac3; exit 1; fi
+  if read -t 0.2 -u "${KMSG[0]}" L; then
+    # New EDID (TV, cable, start): let go of hdmi:0 and re-arm the 5.1 once HDMI settles (pre waits 20 s without EDID).
+    # If the 5.1 keeps hdmi:0, the TV announces the EDID again and the driver's re-arm loops without picture.
+    echo "$(date +%T) EDID: $L -> releasing HDMI, the 5.1 re-arms when it settles"
+    touch "$XDG_RUNTIME_DIR/ps5-ac3-no-stereo"
+    systemctl --user restart --no-block ps5-ac3
+    exit 0
+  fi
+done

@@ -1,0 +1,30 @@
+#!/bin/bash
+# pre: HDMI card profile off and default output on the 5.1 sink. stereo: back to stereo PCM.
+card(){ timeout 5 pactl list cards | awk '/^Card #/{n=""} /^\tName: /{n=$2} /alsa.id = "HDMI"/{print n; exit}'; }
+case "$1" in
+  pre)
+    # Wait for HDMI to settle: 20 s without a new EDID and at least 60 s of uptime. Game Mode's first modeset
+    # (~40 s in, with its EDID and re-arm) then happens before the 5.1 plays: with data on hdmi:0 the
+    # driver's re-arm loops and the picture does not come back.
+    for i in $(seq 90); do
+      NOW=$(cut -d. -f1 /proc/uptime); LAST=$(dmesg | grep "got real edid" | tail -1 | sed -E "s/^\\[ *([0-9]+).*/\\1/"); LAST=${LAST:-0}
+      [ $((NOW - LAST)) -ge 20 ] && [ "$NOW" -ge 60 ] && break; sleep 2
+    done
+    for i in $(seq 30); do timeout 5 pactl list short sinks | grep -q ps5-ac3-sink && break; sleep 1; done
+    timeout 5 pactl set-card-profile "$(card)" off
+    rm -f "$XDG_RUNTIME_DIR/ps5-ac3-no-stereo" "$XDG_RUNTIME_DIR/ps5-ac3-bad-bit"
+    timeout 5 pactl set-default-sink ps5-ac3-sink ;;
+  stereo)
+    # Skipped when a restart or mode change asked for it.
+    [ -f "$XDG_RUNTIME_DIR/ps5-ac3-no-stereo" ] && exit 0
+    C=$(card); [ -n "$C" ] || exit 0
+    # Wait until the bitstream sink lets go of the device; if the card comes back first, WirePlumber makes no stereo sink.
+    for i in $(seq 20); do timeout 5 pactl list short sinks | grep -q "ps5-hdmi-bitstream.*RUNNING" || break; sleep 0.5; done
+    for t in 1 2 3; do
+      timeout 5 pactl set-card-profile "$C" off; sleep 0.5
+      timeout 5 pactl set-card-profile "$C" output:hdmi-stereo
+      for i in $(seq 10); do S=$(timeout 5 pactl list short sinks | awk -v c="${C#alsa_card.}" '$2 ~ c && /hdmi-stereo/{print $2; exit}'); [ -n "$S" ] && break 2; sleep 0.5; done
+    done
+    [ -n "$S" ] && timeout 5 pactl set-default-sink "$S" ;;
+esac
+exit 0
