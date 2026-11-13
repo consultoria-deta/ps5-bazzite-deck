@@ -1,0 +1,19 @@
+[Unit]
+Description=Live 5.1: Dolby Digital 5.1 (HDMI) -> AC-3 640k -> HDMI bitstream with AES0=0x06
+Documentation=file:///usr/share/doc/ps5-ac3/README.md
+After=pipewire.service wireplumber.service pipewire-pulse.service
+Wants=ps5-ac3-watchdog.service
+StartLimitIntervalSec=120
+StartLimitBurst=5
+
+[Service]
+TimeoutStartSec=300
+ExecStartPre=/usr/libexec/ps5-ac3/ctl pre
+ExecStart=/usr/libexec/ps5-ac3/pipe
+ExecStopPost=/usr/libexec/ps5-ac3/ctl stereo
+Restart=always
+RestartSec=3
+OOMScoreAdjust=-100
+
+[Install]
+WantedBy=default.target

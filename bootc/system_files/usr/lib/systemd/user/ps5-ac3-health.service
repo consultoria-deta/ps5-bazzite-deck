@@ -1,0 +1,7 @@
+[Unit]
+Description=Live 5.1 health check: brings back PipeWire, pulse and the pipe if they fell over
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/ps5-ac3/health
+OOMScoreAdjust=-100

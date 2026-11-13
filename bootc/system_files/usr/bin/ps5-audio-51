@@ -1,0 +1,41 @@
+#!/bin/bash
+# Live 5.1 over HDMI as Dolby Digital (AC-3), for the current user. Off unless enabled.
+#   ps5-audio-51 enable    copy the PipeWire/WirePlumber files to your config, start the pipe
+#   ps5-audio-51 disable   stop it, remove those files, back to stereo
+#   ps5-audio-51 restart   restart the pipe (for a Steam shortcut: no terminal needed)
+#   ps5-audio-51 status
+# Needs a TV, soundbar or receiver that decodes Dolby Digital over HDMI. More: /usr/share/doc/ps5-ac3/README.md
+set -u
+S=/usr/share/ps5-ac3; C=${XDG_CONFIG_HOME:-$HOME/.config}; FLAG=$XDG_RUNTIME_DIR/ps5-ac3-no-stereo
+PW="$C/pipewire/pipewire.conf.d"; WP="$C/wireplumber/wireplumber.conf.d"
+aes(){ amixer -c HDMI cget name="IEC958 Playback Default" | grep -o "AES0=0x[0-9a-f]*"; }
+note(){ notify-send "Audio 5.1" "$1" 2>/dev/null; echo "$1"; }
+case "${1:-}" in
+  enable)
+    mkdir -p "$PW" "$WP"
+    cp "$S"/pipewire/*.conf "$PW/"; cp "$S"/wireplumber/*.conf "$WP/"
+    for u in pipewire pipewire-pulse wireplumber; do
+      mkdir -p "$C/systemd/user/$u.service.d"; cp "$S/user-dropins/10-ps5-audio-oom.conf" "$C/systemd/user/$u.service.d/"
+    done
+    systemctl --user daemon-reload
+    systemctl --user restart pipewire pipewire-pulse wireplumber
+    systemctl --user enable --now ps5-ac3-health.timer
+    systemctl --user enable --now --no-block ps5-ac3
+    note "Enabled: choose \"Dolby Digital 5.1 (HDMI)\" as the output. It starts once HDMI has settled (up to ~60 s)." ;;
+  disable)
+    systemctl --user disable --now ps5-ac3-health.timer ps5-ac3 2>/dev/null
+    rm -f "$FLAG" "$PW"/60-ps5-ac3-sink.conf "$PW"/61-ps5-hdmi-bitstream.conf "$WP"/60-ps5-ac3-no-restore-profile.conf
+    for u in pipewire pipewire-pulse wireplumber; do rm -f "$C/systemd/user/$u.service.d/10-ps5-audio-oom.conf"; done
+    systemctl --user daemon-reload
+    systemctl --user restart pipewire pipewire-pulse wireplumber
+    note "Disabled: back to stereo." ;;
+  restart)
+    touch "$FLAG"; rm -f "$XDG_RUNTIME_DIR/ps5-ac3-bad-bit"
+    systemctl --user reset-failed ps5-ac3 2>/dev/null; systemctl --user restart ps5-ac3
+    for i in $(seq 40); do pactl list short sinks | grep -q "ps5-hdmi-bitstream.*RUNNING" && break; sleep 1; done
+    pactl set-default-sink ps5-ac3-sink
+    if [ "$(aes)" = "AES0=0x06" ] && pactl list short sinks | grep -q "ps5-hdmi-bitstream.*RUNNING"; then note "Restarted: Dolby Digital 5.1 ready"; else note "Not ready: $(aes)"; fi ;;
+  status)
+    echo "pipe=$(systemctl --user is-active ps5-ac3) watchdog=$(systemctl --user is-active ps5-ac3-watchdog) health=$(systemctl --user is-active ps5-ac3-health.timer) $(aes) default=$(pactl get-default-sink)" ;;
+  *) sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac
