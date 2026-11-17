@@ -1,0 +1,28 @@
+name: CI VERDE kernel
+# Fork only, not part of the PR: the kernel job of release.yml on GitHub's runner, for the VERDE patch branch.
+# No release, no pins, no images.
+on:
+  push:
+    branches: [ci/verde-kernel-build]
+  workflow_dispatch:
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v7
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache
+          df -h /
+      - name: Build
+        run: |
+          D=$RUNNER_TEMP/ps5-build
+          REPO="$D" bash build.sh
+          mkdir -p out && cp "$D"/linux-bin/linux-ps5-*.rpm out/
+          sha256sum out/*.rpm
+      - uses: actions/upload-artifact@v7
+        with:
+          name: kernel-rpm
+          path: out/*.rpm
