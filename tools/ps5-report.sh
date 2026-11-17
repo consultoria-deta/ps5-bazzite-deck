@@ -36,15 +36,16 @@ e=open('/sys/class/drm/$CON/edid','rb').read()
 for i in range(54,126,18):
     if e[i:i+3]==b'\0\0\0' and e[i+3]==0xfc: print(e[i+5:i+18].decode('ascii','replace').strip()); break
 " 2>/dev/null)
-MODE=$(sudo grep -m1 'mode: "' /sys/kernel/debug/dri/0/state 2>/dev/null | awk '{print $2, $3 "Hz"}' | tr -d '"')
-VRR=$(sudo grep -m1 'vrr_enabled' /sys/kernel/debug/dri/0/state 2>/dev/null | awk -F= '{print $2}')
+# the CRTC that shows a picture: the first one in the list can be switched off (its mode is "", which read as ": 0Hz")
+CRTC=$(sudo cat /sys/kernel/debug/dri/0/state 2>/dev/null | awk '/^crtc\[/ { if (m != "") exit; v = "" }
+    /mode: "[^"]/ { n = $2; gsub(/"/, "", n); m = n " " $3 "Hz" }
+    /vrr_enabled=/ { split($0, a, "="); v = a[2] }
+    END { print m "|" v }')
+MODE=${CRTC%%|*}; VRR=${CRTC#*|}
 ROOT=$(lsblk -no tran "/dev/$(lsblk -no pkname "$(findmnt -no SOURCE /sysroot 2>/dev/null || findmnt -no SOURCE /)" 2>/dev/null | head -1)" 2>/dev/null | head -1)
 WARM=$(journalctl -b -u ps5-wifi-repair --no-pager -o cat 2>/dev/null | grep -c 'after the warm reboot')
 BTA=$(cat /sys/class/bluetooth/hci0/address 2>/dev/null || btmgmt info 2>/dev/null < /dev/null | awk '/addr /{print $2; exit}')
-if [ -z "$BTA" ]; then BT="no adapter"
-elif [ -e /etc/ps5-bazzite-deck/bt-address-off ] || { [ ! -e /etc/ps5-bazzite-deck/bt-address-on ] && lsusb 2>/dev/null | grep -q 0e8d:3603; }; then BT="$BTA (Linux-only address off)"
-elif [ $(( 0x${BTA%%:*} & 2 )) -ne 0 ]; then BT="$BTA (Linux-only address applied)"
-else BT="$BTA (Linux-only address NOT applied)"; fi
+BT=${BTA:-no adapter}
 WIFI=$(nmcli -t -f TYPE,STATE device 2>/dev/null | grep -m1 '^wifi' | cut -d: -f2)
 VUSE=$(k | grep -o -m1 'VRAM: [0-9]*M' | grep -o '[0-9]*')
 VTXT=$(for d in /efi /boot/efi; do [ -f "$d/vram.txt" ] && { tr -d '[:space:]' < "$d/vram.txt"; break; }; done)
@@ -124,7 +125,7 @@ echo "SUMMARY: $INSTALL | $MODEL | HDMI ${HDMI:-?} | ${WIRELESS%% (*} | ${DNAME:
 
 echo; echo "=== Bluetooth"
 btmgmt info 2>/dev/null | grep -m2 -e 'addr ' -e 'current settings' | sed 's/^\s*/  /'
-for u in ps5-bt-addr ps5-bt-pro-addr ps5-bt-import ps5-bt-revive; do
+for u in ps5-bt-import ps5-bt-revive; do
   s=$(systemctl is-active "$u" 2>/dev/null); [ "$s" = inactive ] && s=$(systemctl show -p Result --value "$u" 2>/dev/null)
   echo "  $u: $s"; journalctl -b -u "$u" --no-pager -o cat 2>/dev/null | tail -3 | sed 's/^/    /'
 done
@@ -136,7 +137,7 @@ nmcli -t -f DEVICE,TYPE,STATE device 2>/dev/null | grep -v -e '^lo' -e p2p | sed
 W=; for n in /sys/class/net/wl* /sys/class/net/mlan*; do [ -e "$n" ] && W=${n##*/} && break; done
 [ -n "$W" ] && echo "  $W: driver $(basename "$(readlink -f "/sys/class/net/$W/device/driver")" 2>/dev/null), $(iw dev "$W" get power_save 2>/dev/null)"
 echo "  firmware: $(ls /etc/firmware/nxp/ /lib/firmware/nxp/pcieuartiw620_combo_v1.bin 2>/dev/null | tr '\n' ' ')"
-echo "  from the loader via the initrd (/run/ps5): $( [ -d /run/ps5 ] && { find /run/ps5 -type f | sed 's#^/run/ps5/##' | tr '\n' ' '; echo; } || echo 'nothing: loader older than v2.13')"
+echo "  from the loader via the initrd (/run/ps5): $(if [ -d /run/ps5 ]; then sudo find /run/ps5 -type f 2>/dev/null | sed 's#^/run/ps5/##' | tr '\n' ' '; echo; else echo 'nothing: loader older than v2.13'; fi)"
 journalctl -b -u ps5-stage-firmware -u ps5-wifi-repair --no-pager -o cat 2>/dev/null | tail -4 | sed 's/^/  /'
 k | grep -i -e moal -e mlan -e wlan -e mt79 -e 'firmware' | grep -i -e fail -e error -e timeout -e 'already running' | last 10
 
@@ -168,8 +169,32 @@ if [ -e /run/ostree-booted ]; then
   [ "$(systemctl is-enabled greenboot-set-rollback-trigger.service 2>/dev/null)" = masked ] &&
     echo "  greenboot-set-rollback-trigger is masked: updates fail to stage, run the fix in the v2.7 notes"
   sed 's/^/  /' /usr/share/ps5-bazzite-bootc/VERSION 2>/dev/null
+  # Bazzite's own versions of what most reports touch, to tell its updates from ours
+  echo "  base: $(rpm -q --qf '%{NAME} %{VERSION}\n' gamescope mesa-vulkan-drivers NetworkManager wpa_supplicant linux-firmware steamos-manager 2>/dev/null | grep -v 'not installed' | awk '!seen[$0]++' | tr '\n' ',' | sed 's/,$//; s/,/, /g')"
   journalctl -b -u ps5-bootc-sync -u ps5-grow-root --no-pager -o cat 2>/dev/null | tail -4 | sed 's/^/  /'
 fi
+
+echo; echo "=== Changed on this console"
+# what is not the image's own: it decides whether a problem is ours to find
+python3 - << 'PYEOF' 2>/dev/null
+import glob, tomllib
+base = {k for f in glob.glob("/usr/lib/bootc/kargs.d/*.toml") for k in tomllib.load(open(f, "rb")).get("kargs", [])}
+own = ("root=", "boot=", "ostree=", "console=", "ps5_gpufreq.temp_limit=")
+extra = [t for t in open("/proc/cmdline").read().split() if t not in base and t != "rw" and not t.startswith(own)]
+print("  kernel options added: " + (" ".join(extra) or "none"))
+PYEOF
+FOREIGN=$(for m in $(cut -d' ' -f1 /proc/modules); do modinfo -n "$m" > /dev/null 2>&1 || printf '%s ' "$m"; done)
+echo "  kernel modules from outside the image: ${FOREIGN:-none}  (taint $(cat /proc/sys/kernel/tainted 2>/dev/null))"
+SVC=$(for u in ps5fan.service ps5boost.service; do [ "$(systemctl is-enabled "$u" 2>/dev/null)" = enabled ] && printf '%s ' "$u"; done)
+echo "  ps5-linux-tools services (a second fan and CPU control): ${SVC:-none}"
+LAYERED=$(rpm-ostree status -b 2>/dev/null | grep -iE 'LayeredPackages|LocalPackages' | sed 's/^ *//' | tr '\n' ' ')
+echo "  packages added with rpm-ostree: ${LAYERED:-none}"
+# tuned and Steam's Wi-Fi settings rewrite these two themselves
+ETC=$(for f in /etc/modprobe.d/*.conf /etc/NetworkManager/conf.d/*.conf; do
+    case "$f" in */tuned.conf|*/99-valve-wifi-backend.conf) continue ;; esac
+    [ -f "$f" ] && ! cmp -s "$f" "/usr$f" && printf '%s ' "$f"
+done)
+echo "  driver and network settings changed in /etc: ${ETC:-none}"
 
 echo; echo "=== System"
 echo "  cmdline: $(cat /proc/cmdline)"
